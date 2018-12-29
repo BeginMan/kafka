@@ -62,13 +62,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * A Kafka client that publishes records to the Kafka cluster.
+ * kafka java生产者客户端
  * <P>
- * The producer is <i>thread safe</i> and sharing a single producer instance across threads will generally be faster than
- * having multiple instances.
+ * 该生产者是<i>线程安全</i> 多线程中共享一个实例比创建多个生产者要好
  * <p>
- * Here is a simple example of using the producer to send records with strings containing sequential numbers as the key/value
- * pairs.
+ * 下面是生产者配置的简单例子
  * <pre>
  * {@code
  * Properties props = new Properties();
@@ -213,9 +211,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             this.producerConfig = config;
             this.time = Time.SYSTEM;
 
+            // 设置client
             clientId = config.getString(ProducerConfig.CLIENT_ID_CONFIG);
             if (clientId.length() <= 0)
                 clientId = "producer-" + PRODUCER_CLIENT_ID_SEQUENCE.getAndIncrement();
+
+            // 根据配置项创建和注册用于Kafka metrics指标收集的相关对象，用于对Kafka集群相关指标的追踪
             Map<String, String> metricTags = new LinkedHashMap<String, String>();
             metricTags.put("client-id", clientId);
             MetricConfig metricConfig = new MetricConfig().samples(config.getInt(ProducerConfig.METRICS_NUM_SAMPLES_CONFIG))
@@ -225,8 +226,16 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     MetricsReporter.class);
             reporters.add(new JmxReporter(JMX_PREFIX));
             this.metrics = new Metrics(metricConfig, reporters, time);
+            /*
+             * 实例化分区器。
+             * 分区器用于为消息指定分区，客户端可以通过实现Partitioner接口自定义消息分配分区的规则。
+             * 若用户没有自定义分区器，则在KafkaProducer实例化时会使用默认的DefaultPartitioner，
+             * 该分区器分配分区的规则是：若消息指定了Key，则对Key取hash值，然后与可用的分区总数求模；若没有指定Key，则DefalutPartitioner通过一个随机数与可用的总分区数取模。
+             */
             this.partitioner = config.getConfiguredInstance(ProducerConfig.PARTITIONER_CLASS_CONFIG, Partitioner.class);
             long retryBackoffMs = config.getLong(ProducerConfig.RETRY_BACKOFF_MS_CONFIG);
+
+            // 实例化消息Key和Value进行序列化操作的Serializer
             if (keySerializer == null) {
                 this.keySerializer = config.getConfiguredInstance(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
                         Serializer.class);
@@ -245,12 +254,23 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             }
 
             // load interceptors and make sure they get clientId
+            /*
+             * 根据配置实例化一组拦截器（ProducerInterceptor）
+             * 用户可以指定多个拦截器。如果我们希望在消息发送前、消息发送到代理并ack、消息还未到达代理而失败或调用send()方法失败这几种情景下进行相应处理操作，
+             * 就可以通过自定义拦截器实现该接口中相应方法，多个拦截器会被顺序调用执行。
+             */
             userProvidedConfigs.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
             List<ProducerInterceptor<K, V>> interceptorList = (List) (new ProducerConfig(userProvidedConfigs, false)).getConfiguredInstances(ProducerConfig.INTERCEPTOR_CLASSES_CONFIG,
                     ProducerInterceptor.class);
             this.interceptors = interceptorList.isEmpty() ? null : new ProducerInterceptors<>(interceptorList);
 
             ClusterResourceListeners clusterResourceListeners = configureClusterResourceListeners(keySerializer, valueSerializer, interceptorList, reporters);
+            /*
+             * 实例化用于消息发送相关元数据信息的MetaData对象。
+             * MetaData是被客户线程共享的，因此MetaData必须是线程安全的。
+             * MetaData的主要数据结构由两部分组成，一类是用于控制MetaData进行更新操作的相关配置信息，另一类就是集群信息Cluster。
+             * Cluster保存了集群中所有的主题以及所有主题对应的分区信息列表、可用的分区列表、集群的代理列表等信息，在KafkaProducer实例化过程中会根据指定的代理列表初始化Cluster，并第一次更新MetaData。
+             */
             this.metadata = new Metadata(retryBackoffMs, config.getLong(ProducerConfig.METADATA_MAX_AGE_CONFIG), true, clusterResourceListeners);
             this.maxRequestSize = config.getInt(ProducerConfig.MAX_REQUEST_SIZE_CONFIG);
             this.totalMemorySize = config.getLong(ProducerConfig.BUFFER_MEMORY_CONFIG);
@@ -292,6 +312,14 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 this.requestTimeoutMs = config.getInt(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG);
             }
 
+
+            /* 实例化用于存储消息的RecordAccumulator
+             * RecordAccumulator的作用类似一个队列，这里称为消息累加器。
+             * KafkaProducer发送的消息都先被追加到消息累加器的一个双端对列Deque中，在消息累加器内部每一个主题的每一个分区TopicPartition对应一个双端队列
+             * 队列中的元素是RecordBatch，而RecordBatch是由同一个主题发往同一个分区的多条消息Record组成
+             * 并将结果以每个TopicPartiton作为Key，该TopicPartition所对应的双端队列作为Value保存到一个ConcurrentMap类型的batches中。
+             *
+             */
             this.accumulator = new RecordAccumulator(config.getInt(ProducerConfig.BATCH_SIZE_CONFIG),
                     this.totalMemorySize,
                     this.compressionType,

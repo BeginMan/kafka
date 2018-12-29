@@ -56,6 +56,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>
  * The accumulator uses a bounded amount of memory and append calls will block when that memory is exhausted, unless
  * this behavior is explicitly disabled.
+ *
+ * 采用双端队列是为了当消息发送失败需要重试时，将消息优先插入到队列的头部，而最新的消息总是插入到队列尾部，
+ * 只有需要重试发送时才在队列头部插入，发送消息是从队列头部获取RecordBatch，这样就实现了对发送失败的消息进行重试发送。
+ * 但是双端队列只是指定了RecordBatch的顺序存储方式，而并没有定义存储空间大小，在消息累加器中有一个BufferPool缓存数据结构，用于存储消息Record。
+ * 在KafkaProducer初始化时根据指定的BufferPool的大小初始化一个BufferPool，引用名为free
  */
 public final class RecordAccumulator {
 
